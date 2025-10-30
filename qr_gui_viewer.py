@@ -247,6 +247,22 @@ class QRViewerGUI:
         )
         auto_refresh_cb.pack(anchor=tk.W, pady=2, padx=5)
         
+        # 图片跳转功能
+        jump_frame = ttk.Frame(control_frame)
+        jump_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(jump_frame, text="跳转到图片:").pack(side=tk.LEFT, padx=5)
+        self.jump_entry = ttk.Entry(jump_frame, width=10)
+        self.jump_entry.pack(side=tk.LEFT, padx=2)
+        self.jump_entry.bind('<Return>', self.jump_to_image)  # 回车键跳转
+        
+        jump_btn = ttk.Button(jump_frame, text="跳转", command=self.jump_to_image, width=6)
+        jump_btn.pack(side=tk.LEFT, padx=2)
+        
+        # 显示当前图片信息
+        self.current_image_info = ttk.Label(control_frame, text="当前图片: 0/0", font=('Arial', 9))
+        self.current_image_info.pack(anchor=tk.W, pady=2, padx=5)
+        
         # 自动查找最新日志文件
         self.auto_find_latest_var = tk.BooleanVar(value=True)
         auto_find_cb = ttk.Checkbutton(
@@ -406,6 +422,9 @@ class QRViewerGUI:
             
             # 添加信息覆盖层
             self.draw_image_overlay(current_crop, canvas_width, canvas_height)
+            
+            # 更新当前图片信息
+            self.update_current_image_info()
             
         except Exception as e:
             print(f"图片显示错误: {e}")
@@ -594,6 +613,74 @@ class QRViewerGUI:
                 
         except Exception as e:
             print(f"导航箭头绘制错误: {e}")
+    
+    def jump_to_image(self, event=None):
+        """跳转到指定图片"""
+        try:
+            jump_text = self.jump_entry.get().strip()
+            if not jump_text:
+                return
+            
+            # 解析跳转目标
+            if jump_text.lower() == 'first' or jump_text == '1':
+                target_delta = 1 - min(self.slot_num, self.received_count)
+            elif jump_text.lower() == 'last' or jump_text == '0':
+                target_delta = 0
+            else:
+                try:
+                    target_index = int(jump_text)
+                    N = min(self.slot_num, self.received_count)
+                    
+                    # 检查输入范围
+                    if target_index < 1:
+                        self.update_final_result("图片序号必须大于0")
+                        return
+                    elif target_index > N:
+                        self.update_final_result(f"图片序号超出范围，当前只有{N}张图片")
+                        return
+                    
+                    # 计算delta值（从最新图片开始计算）
+                    # delta = 0 表示最新图片（第N张），delta = -1 表示倒数第二张（第N-1张）
+                    # 要跳转到第target_index张，需要：delta = target_index - N
+                    target_delta = target_index - N
+                except ValueError:
+                    self.update_final_result("请输入有效的图片序号（1-{})或'first'/'last'".format(min(self.slot_num, self.received_count)))
+                    return
+            
+            # 检查跳转范围
+            N = min(self.slot_num, self.received_count)
+            if target_delta > 0 or target_delta < (1 - N):
+                self.update_final_result("跳转目标超出范围")
+                return
+            
+            # 执行跳转
+            self.delta = target_delta
+            self.locked_delta = target_delta
+            self.update_image_display()
+            
+            # 更新显示信息
+            current_page = N + self.delta
+            self.current_image_info.config(text=f"当前图片: {current_page}/{N}")
+            
+            # 清空输入框
+            self.jump_entry.delete(0, tk.END)
+            
+            self.update_final_result(f"已跳转到图片 {current_page}")
+            
+        except Exception as e:
+            self.update_final_result(f"跳转失败: {e}")
+    
+    def update_current_image_info(self):
+        """更新当前图片信息显示"""
+        try:
+            N = min(self.slot_num, self.received_count)
+            if N > 0:
+                current_page = N + self.delta
+                self.current_image_info.config(text=f"当前图片: {current_page}/{N}")
+            else:
+                self.current_image_info.config(text="当前图片: 0/0")
+        except Exception as e:
+            print(f"更新图片信息错误: {e}")
     
     def on_key_press(self, event):
         """处理键盘事件"""
