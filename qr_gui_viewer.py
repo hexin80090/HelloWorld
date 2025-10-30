@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-二维码识别上位机界面程序
-用于展示 simple_receiver.py 脚本的识别结果
-按照文档设计：区域1（统计）、区域2（最终识别结果）、区域3（图片）、区域4（每次识别结果）
+二维码识别上位机界面程序 - 集成版
+集成了接收、显示、识别功能，一个程序完成所有功能
+采用simple_receiver.py的OpenCV界面显示图片
+按照文档设计：区域1（统计）、区域2（最终识别结果）、区域3（图片-OpenCV窗口）、区域4（每次识别结果）
 """
 
 import tkinter as tk
@@ -16,21 +17,33 @@ import queue
 import csv
 import os
 import time
+import json
 from datetime import datetime
 from collections import defaultdict
+import pynng
+import pynng.exceptions as nng_exceptions
+from turbojpeg import TurboJPEG
+from dynamsoft_barcode_reader_bundle import *
 
 
 class QRViewerGUI:
-    def __init__(self, root):
+    def __init__(self, root, listen_host=None, camera_ip=None, enable_dbr=False):
         self.root = root
         self.root.title("二维码识别结果展示系统")
         self.root.geometry("1600x1000")
         
-        # 数据队列和状态
-        self.image_queue = queue.Queue()
-        self.current_image = None
-        self.current_metadata = None
-        self.running = True
+        # 配置参数（从命令行参数获取）
+        self.listen_host = listen_host if listen_host else '0.0.0.0'
+        self.listen_port = 5555
+        self.camera_node_ip = camera_ip if camera_ip else '192.168.0.176'
+        self.ack_port = 5556
+        self.dbr_enabled = bool(enable_dbr)
+        
+        # 加载配置文件
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'camera_config.json')
+        self.config = self._load_config(config_path)
+        self.dbr_thread_count = self.config.get('MaxParallelTasks', 8)
+        self.dbr_timeout = self.config.get('Timeout', 10000)
         
         # 识别结果数据
         self.recognition_results = []  # 原始DBR log格式数据
@@ -52,6 +65,66 @@ class QRViewerGUI:
         # 日志文件监听
         self.log_file_path = None
         self.last_log_position = 0
+        
+        # NNG接收器（服务器模式，接收数据）
+        self.nng_subscriber = None
+        self.received_count = 0
+        self.last_successful_receive = 0
+        self.current_frame_sequence = 0
+        self.recv_seq_counter = 0
+        
+        # ACK发送器
+        self.ack_sender = None
+        
+        # DBR相关
+        self.dbr_queue = None
+        self.dbr_threads = []
+        self.dbr_log_file = None
+        self.dbr_global_seq = 0
+        self.dbr_dropped_frames = 0
+        self.dbr_total_time_ms = 0.0
+        self.dbr_total_attempts = 0
+        self.dbr_total_decoded = 0
+        self.dbr_stats_lock = threading.Lock()
+        
+        # OpenCV显示相关（从simple_receiver.py集成）
+        self.running = True
+        self.slot_num = 200
+        self.crops_buffer = [None] * self.slot_num
+        self.write_index = 0
+        self.read_index = -1
+        self.latest_index = -1
+        self.locked_latest_index = -1
+        self.first_crop = True
+        self.base_round_duration = 0.03
+        self.last_switch_time = 0
+        self.delta = 0
+        self.locked_delta = 0
+        self.left_arrow_rect = None
+        self.right_arrow_rect = None
+        
+        # 初始化TurboJPEG
+        try:
+            self.jpeg = TurboJPEG()
+        except Exception as e:
+            if os.name == 'nt':
+                try:
+                    self.jpeg = TurboJPEG(r"C:\libjpeg-turbo64\bin\libturbojpeg.dll")
+                except:
+                    print(f"❌ TurboJPEG初始化失败: {e}")
+                    raise
+            else:
+                print(f"❌ TurboJPEG初始化失败: {e}")
+                raise
+        
+        # 初始化NNG服务器和DBR（在UI创建之前）
+        self._init_nng_server()
+        self._init_ack_sender()
+        if self.dbr_enabled:
+            self._init_dbr()
+        
+        # 设置鼠标回调函数（OpenCV窗口用）
+        self.setup_mouse_callback()
         
         # 创建UI
         self.create_widgets()
@@ -228,42 +301,226 @@ class QRViewerGUI:
         self.update_summary_table()
     
     def create_image_panel(self, parent):
-        """创建区域3：图片显示面板"""
-        # Canvas用于显示图像
-        self.canvas = tk.Canvas(parent, bg='black', relief=tk.SUNKEN, borderwidth=2)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
+        """创建区域3：图片显示面板 - 集成OpenCV图片显示到Tkinter"""
+        # 创建Canvas用于显示图片
+        self.image_canvas = tk.Canvas(parent, bg='black', highlightthickness=0)
+        self.image_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # 信息显示（覆盖在图像上）
-        info_frame = ttk.Frame(parent)
-        info_frame.place(in_=self.canvas, x=10, y=10, anchor=tk.NW)
+        # 绑定鼠标点击事件
+        self.image_canvas.bind("<Button-1>", self.on_image_click)
         
-        self.info_label = ttk.Label(
-            info_frame, 
-            text="等待图像数据...",
-            background='black',
-            foreground='lime',
-            font=('Courier', 9)
+        # 绑定键盘事件
+        self.image_canvas.bind("<Key>", self.on_key_press)
+        self.image_canvas.focus_set()  # 让Canvas可以接收键盘事件
+        
+        # 初始显示提示信息
+        self.show_image_placeholder()
+    
+    def show_image_placeholder(self):
+        """显示图片占位符"""
+        self.image_canvas.delete("all")
+        self.image_canvas.create_text(
+            self.image_canvas.winfo_width()//2, 
+            self.image_canvas.winfo_height()//2,
+            text="等待图片数据...\n\n按ESC退出，方向键翻页，空格手动识别",
+            fill="white",
+            font=('Arial', 12),
+            justify=tk.CENTER
         )
-        self.info_label.pack()
+    
+    def on_image_click(self, event):
+        """处理图片区域的鼠标点击事件"""
+        # 模拟simple_receiver.py的鼠标点击处理
+        x, y = event.x, event.y
+        canvas_width = self.image_canvas.winfo_width()
+        canvas_height = self.image_canvas.winfo_height()
         
-        # TCP连接状态指示
-        self.status_frame = ttk.Frame(parent)
-        self.status_frame.place(in_=self.canvas, relx=1.0, rely=0, x=-10, y=10, anchor=tk.NE)
+        # 检查是否点击在左箭头区域
+        if self.left_arrow_rect and self.is_point_in_rect(x, y, self.left_arrow_rect):
+            N = min(1000, self.received_count)
+            if self.delta > (1 - N):
+                self.delta -= 1
+                self.update_image_display()
         
-        self.status_label = ttk.Label(
-            self.status_frame,
-            text="●",
-            font=('Arial', 16),
-            foreground='red'
-        )
-        self.status_label.pack()
+        # 检查是否点击在右箭头区域
+        elif self.right_arrow_rect and self.is_point_in_rect(x, y, self.right_arrow_rect):
+            if self.delta < 0:
+                self.delta += 1
+                self.update_image_display()
+    
+    def update_image_display(self):
+        """更新图片显示"""
+        if not hasattr(self, 'image_canvas'):
+            return
+            
+        # 获取当前要显示的照片
+        display_index = (self.read_index + self.locked_delta) % self.slot_num
+        current_crop = self.crops_buffer[display_index]
         
-        self.status_text = ttk.Label(
-            self.status_frame,
-            text="未连接",
-            font=('Arial', 8)
-        )
-        self.status_text.pack()
+        if not current_crop:
+            self.show_image_placeholder()
+            return
+        
+        try:
+            # 解码JPEG数据
+            img_data = current_crop['image_data']
+            bgr_image = self.jpeg.decode(img_data)
+            
+            if bgr_image is None or not isinstance(bgr_image, np.ndarray):
+                self.show_image_placeholder()
+                return
+            
+            # 转换为RGB
+            rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+            
+            # 获取Canvas尺寸
+            canvas_width = self.image_canvas.winfo_width()
+            canvas_height = self.image_canvas.winfo_height()
+            
+            if canvas_width <= 1 or canvas_height <= 1:
+                return  # Canvas还没有初始化
+            
+            # 计算缩放比例
+            img_height, img_width = rgb_image.shape[:2]
+            scale = min(canvas_width/img_width, canvas_height/img_height)
+            new_width = int(img_width * scale)
+            new_height = int(img_height * scale)
+            
+            # 缩放图片
+            resized_image = cv2.resize(rgb_image, (new_width, new_height))
+            
+            # 转换为PIL Image
+            pil_image = Image.fromarray(resized_image)
+            
+            # 转换为Tkinter PhotoImage
+            photo = ImageTk.PhotoImage(pil_image)
+            
+            # 清除Canvas并显示图片
+            self.image_canvas.delete("all")
+            x = (canvas_width - new_width) // 2
+            y = (canvas_height - new_height) // 2
+            self.image_canvas.create_image(x, y, anchor=tk.NW, image=photo)
+            
+            # 保存引用防止垃圾回收
+            self.image_canvas.image = photo
+            
+            # 添加信息覆盖层
+            self.draw_image_overlay(current_crop, canvas_width, canvas_height)
+            
+        except Exception as e:
+            print(f"图片显示错误: {e}")
+            self.show_image_placeholder()
+    
+    def draw_image_overlay(self, current_crop, canvas_width, canvas_height):
+        """在图片上绘制信息覆盖层"""
+        try:
+            metadata = current_crop['metadata']
+            
+            # 基础信息
+            frame_id = current_crop.get('frame_sequence', 0)
+            display_index = (self.read_index + self.locked_delta) % self.slot_num
+            info_text = f"Frame:{frame_id} | Index:{display_index} | Total:{self.received_count}"
+            
+            # 在Canvas上绘制文本
+            self.image_canvas.create_text(
+                10, 20, 
+                text=info_text, 
+                fill="lime", 
+                font=('Arial', 10, 'bold'),
+                anchor=tk.W
+            )
+            
+            # TCP连接状态
+            status_color = "lime" if self.tcp_connected else "red"
+            status_text = "TCP: 连接" if self.tcp_connected else "TCP: 断开"
+            self.image_canvas.create_text(
+                canvas_width - 10, 20, 
+                text=status_text, 
+                fill=status_color, 
+                font=('Arial', 10, 'bold'),
+                anchor=tk.E
+            )
+            
+            # 检测信息
+            roi_info = metadata.get('roi', {})
+            label = roi_info.get('label', 'unknown')
+            confidence = roi_info.get('confidence', 0.0)
+            pose_info = metadata.get('pose', {})
+            position_array = pose_info.get('position', [0.0, 0.0, 0.0])
+            
+            if len(position_array) >= 3:
+                px = f"{position_array[0]:.2f}"
+                py = f"{position_array[1]:.2f}"
+                pz = f"{position_array[2]:.2f}"
+                detection_text = f"({px},{py},{pz}) {label} | Conf: {confidence:.3f}"
+            else:
+                detection_text = f"{label} | Conf: {confidence:.3f}"
+            
+            self.image_canvas.create_text(
+                10, 50, 
+                text=detection_text, 
+                fill="yellow", 
+                font=('Arial', 9),
+                anchor=tk.W
+            )
+            
+            # DBR识别结果
+            dbr_items = current_crop.get('dbr_items')
+            dbr_elapsed = current_crop.get('dbr_elapsed_ms')
+            if dbr_items:
+                elapsed_text = f"DBR: {float(dbr_elapsed):.1f} ms"
+                self.image_canvas.create_text(
+                    10, canvas_height - 40, 
+                    text=elapsed_text, 
+                    fill="cyan", 
+                    font=('Arial', 9),
+                    anchor=tk.W
+                )
+                
+                # 显示前2个结果
+                for i, item in enumerate(dbr_items[:2]):
+                    fmt = item.get('fmt', 'UNK')
+                    txt = item.get('text', '')
+                    line = f"[{fmt}] {txt}"
+                    y = canvas_height - 20 + i * 15
+                    self.image_canvas.create_text(
+                        10, y, 
+                        text=line, 
+                        fill="cyan", 
+                        font=('Arial', 8),
+                        anchor=tk.W
+                    )
+            
+            # 控制提示
+            control_text = "ESC=Quit, SPACE=Manual DBR, ←→=Navigate"
+            self.image_canvas.create_text(
+                canvas_width - 10, canvas_height - 10, 
+                text=control_text, 
+                fill="white", 
+                font=('Arial', 8),
+                anchor=tk.SE
+            )
+            
+        except Exception as e:
+            print(f"覆盖层绘制错误: {e}")
+    
+    def on_key_press(self, event):
+        """处理键盘事件"""
+        key = event.keysym
+        if key == "Escape":
+            self.running = False
+            self.root.quit()
+        elif key == "space":
+            self.manual_dbr_trigger()
+        elif key == "Left":
+            N = min(self.slot_num, self.received_count)
+            if self.delta > (1 - N):
+                self.delta -= 1
+                self.update_image_display()
+        elif key == "Right":
+            if self.delta < 0:
+                self.delta += 1
+                self.update_image_display()
     
     def create_log_result_panel(self, parent):
         """创建区域4：每次识别结果面板（DBR Log格式）"""
@@ -730,10 +987,265 @@ class QRViewerGUI:
             # 忽略调整错误（可能是窗口还未完全初始化）
             pass
     
+    def _load_config(self, config_file):
+        """加载配置文件"""
+        try:
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    print(f"✅ 已加载配置文件: {config_file}")
+                    return config
+            else:
+                print(f"⚠️ 配置文件不存在: {config_file}，使用默认配置")
+                return {}
+        except Exception as e:
+            print(f"❌ 加载配置文件失败: {e}，使用默认配置")
+            return {}
+    
+    def _init_nng_server(self):
+        """初始化NNG服务器（监听模式）"""
+        try:
+            self.nng_subscriber = pynng.Sub0()
+            self.nng_subscriber.recv_timeout = 3000
+            self.nng_subscriber.subscribe(b"")
+            if self.listen_host == '0.0.0.0':
+                listen_addr = f"tcp://*:{self.listen_port}"
+            else:
+                listen_addr = f"tcp://{self.listen_host}:{self.listen_port}"
+            self.nng_subscriber.listen(listen_addr)
+            print(f"✅ NNG服务器启动，监听: {self.listen_host}:{self.listen_port}")
+        except Exception as e:
+            print(f"❌ NNG服务器启动失败: {e}")
+            raise
+    
+    def _init_ack_sender(self):
+        """初始化ACK发送器"""
+        try:
+            self.ack_sender = pynng.Pub0()
+            ack_addr = f"tcp://{self.camera_node_ip}:{self.ack_port}"
+            self.ack_sender.dial(ack_addr, block=False)
+            print(f"✅ ACK发送器已连接: {ack_addr}")
+        except Exception as e:
+            print(f"⚠️ ACK发送器初始化失败: {e}")
+            self.ack_sender = None
+    
+    def _send_ack(self, frame_sequence, timestamp_ms):
+        """发送ACK消息"""
+        if self.ack_sender:
+            try:
+                ack_data = (
+                    frame_sequence.to_bytes(2, byteorder='big') +
+                    timestamp_ms.to_bytes(4, byteorder='big')
+                )
+                self.ack_sender.send(ack_data)
+            except Exception as e:
+                pass  # 静默处理ACK发送失败
+    
+    def _init_dbr(self):
+        """初始化多线程DBR识别"""
+        try:
+            err_code, err_str = LicenseManager.init_license("t0083YQEAAIxyZ63FS23f0lbnGqIWVNzyJUhlk6dSuGADrJOsEZqnYvegAZSqltDyy/PWWuBX508E6/Ib4GVkVU2PMdf4fVuY/r2pvDcjy6TyBN1USaY=")
+            if err_code != EnumErrorCode.EC_OK and err_code != EnumErrorCode.EC_LICENSE_WARNING:
+                print(f"❌ DBR 许可证初始化失败: {err_code} - {err_str}")
+                self.dbr_enabled = False
+                return
+            
+            self.dbr_queue = queue.Queue(maxsize=200)
+            print(f"✅ 多线程DBR已启用：{self.dbr_thread_count}个线程，超时时间：{self.dbr_timeout}ms")
+            
+            # 准备日志文件
+            try:
+                log_dir = os.path.join(os.path.dirname(__file__), 'test_results')
+                os.makedirs(log_dir, exist_ok=True)
+                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                self.dbr_log_file = os.path.join(log_dir, f'dbr_multithread_result_{ts}.log')
+                with open(self.dbr_log_file, 'a', encoding='utf-8') as f:
+                    f.write('# global_seq, recv_seq, worker_id, slot_status, position, format, text\n')
+                print(f"📝 多线程DBR结果将写入: {self.dbr_log_file}")
+            except Exception as e:
+                print(f"⚠️ DBR日志初始化失败: {e}")
+                self.dbr_log_file = None
+        except Exception as e:
+            print(f"❌ DBR初始化异常: {e}")
+            self.dbr_enabled = False
+    
+    def _deserialize_crops(self, serialized_data):
+        """反序列化裁剪数据"""
+        crops = []
+        ptr = 0
+        
+        # 解析帧头
+        if len(serialized_data) >= 6:
+            frame_sequence = int.from_bytes(serialized_data[0:2], byteorder='big')
+            timestamp_ms = int.from_bytes(serialized_data[2:6], byteorder='big')
+            ptr = 6
+            self.current_frame_sequence = frame_sequence
+            if self.ack_sender:
+                self._send_ack(frame_sequence, timestamp_ms)
+        else:
+            ptr = 0
+        
+        while ptr < len(serialized_data):
+            # 读取元数据
+            metadata_length = int.from_bytes(serialized_data[ptr:ptr+4], byteorder='big')
+            ptr += 4
+            metadata_bytes = serialized_data[ptr:ptr+metadata_length]
+            ptr += metadata_length
+            metadata = json.loads(metadata_bytes.decode('utf-8'))
+            
+            # 读取图像数据
+            img_length = int.from_bytes(serialized_data[ptr:ptr+4], byteorder='big')
+            ptr += 4
+            img_data = serialized_data[ptr:ptr+img_length]
+            ptr += img_length
+            
+            crops.append({
+                'metadata': metadata,
+                'image_data': img_data
+            })
+        
+        return crops
+    
+    def setup_mouse_callback(self):
+        """设置鼠标回调函数"""
+        def mouse_callback(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                self.handle_mouse_click(x, y)
+        self.mouse_callback = mouse_callback
+    
+    def handle_mouse_click(self, x, y):
+        """处理鼠标点击事件"""
+        if self.read_index != self.latest_index:
+            return
+        if self.left_arrow_rect and self.is_point_in_rect(x, y, self.left_arrow_rect):
+            N = min(1000, self.received_count)
+            if self.delta > (1 - N):
+                self.delta -= 1
+        elif self.right_arrow_rect and self.is_point_in_rect(x, y, self.right_arrow_rect):
+            if self.delta < 0:
+                self.delta += 1
+    
+    def is_point_in_rect(self, x, y, rect):
+        """检查点是否在矩形区域内"""
+        if rect is None:
+            return False
+        x1, y1, x2, y2 = rect
+        return x1 <= x <= x2 and y1 <= y <= y2
+    
+    def nng_receive_loop(self):
+        """NNG接收数据循环"""
+        while self.running:
+            try:
+                serialized_data = self.nng_subscriber.recv()
+                crops_data = self._deserialize_crops(serialized_data)
+                self._check_frame_loss()
+                
+                self.received_count += len(crops_data)
+                self.last_successful_receive = time.time()
+                self.stats['tcp_connected'] = True
+                self.root.after(0, lambda: self.update_status(True))
+                
+                for crop in crops_data:
+                    self.recv_seq_counter += 1
+                    recv_seq = self.recv_seq_counter
+                    slot = {
+                        'metadata': crop.get('metadata'),
+                        'image_data': crop.get('image_data'),
+                        'recv_seq': recv_seq,
+                        'slot_index': self.write_index,
+                        'frame_sequence': self.current_frame_sequence,
+                        'dbr_elapsed_ms': None,
+                        'dbr_items': None,
+                    }
+                    self.crops_buffer[self.write_index] = slot
+                    self.write_index = (self.write_index + 1) % self.slot_num
+                    
+                    if self.dbr_enabled and self.dbr_queue is not None:
+                        jpeg_bytes = slot.get('image_data')
+                        if isinstance(jpeg_bytes, (bytes, bytearray)):
+                            slot_index = (self.write_index - 1) % self.slot_num
+                            payload = (recv_seq, jpeg_bytes, slot_index)
+                            try:
+                                self.dbr_queue.put_nowait(payload)
+                            except queue.Full:
+                                self.dbr_dropped_frames += 1
+                                try:
+                                    _ = self.dbr_queue.get_nowait()
+                                    self.dbr_queue.put_nowait(payload)
+                                except:
+                                    pass
+                
+                self.latest_index = (self.write_index - 1) % self.slot_num
+                
+            except pynng.Timeout:
+                continue
+            except nng_exceptions.Closed:
+                print("🔒 NNG Socket已关闭")
+                break
+            except Exception as e:
+                print(f"❌ NNG接收异常: {e}")
+                time.sleep(0.1)
+    
+    def opencv_display_loop(self):
+        """GUI图片显示循环（集成到Tkinter Canvas）"""
+        while self.running:
+            try:
+                if self.read_index != self.latest_index:
+                    self.delta = 0
+                    self.locked_delta = 0
+                    
+                    if self.first_crop:
+                        self.locked_latest_index = self.latest_index
+                        photos_to_show = (self.locked_latest_index - self.read_index) % self.slot_num
+                        if photos_to_show == 0:
+                            photos_to_show = 1
+                        display_duration = self.base_round_duration / photos_to_show
+                    
+                    current_time = time.time()
+                    if self.first_crop:
+                        self.read_index = (self.read_index + 1) % self.slot_num
+                        self.last_switch_time = current_time
+                    else:
+                        if current_time - self.last_switch_time >= display_duration:
+                            self.read_index = (self.read_index + 1) % self.slot_num
+                            self.last_switch_time = current_time
+                        else:
+                            time.sleep(0.001)
+                            continue
+                    
+                    if self.read_index == self.locked_latest_index:
+                        self.first_crop = True
+                    else:
+                        self.first_crop = False
+                else:
+                    # 没有新照片时，检查delta变化
+                    if self.delta != self.locked_delta:
+                        self.locked_delta = self.delta
+                        # 更新GUI中的图片显示
+                        self.root.after(0, self.update_image_display)
+                    
+                    time.sleep(0.01)
+                    continue
+                
+                # 有新照片时，更新GUI中的图片显示
+                self.root.after(0, self.update_image_display)
+                
+                # 检查delta变化
+                if self.delta != self.locked_delta:
+                    self.locked_delta = self.delta
+                    self.root.after(0, self.update_image_display)
+                    
+            except Exception as e:
+                print(f"显示循环错误: {e}")
+                time.sleep(0.01)
+    
     def start_update_threads(self):
         """启动更新线程"""
-        threading.Thread(target=self.image_update_loop, daemon=True).start()
+        threading.Thread(target=self.opencv_display_loop, daemon=True).start()
+        threading.Thread(target=self.nng_receive_loop, daemon=True).start()
         threading.Thread(target=self.log_file_monitor_loop, daemon=True).start()
+        if self.dbr_enabled:
+            self._start_dbr_workers()
         self.root.after(100, self.ui_update_loop)
     
     def image_update_loop(self):
@@ -788,15 +1300,202 @@ class QRViewerGUI:
         """从外部添加图像数据"""
         self.image_queue.put((image, metadata))
     
+    def _start_dbr_workers(self):
+        """启动多个DBR工作线程"""
+        print(f"🚀 启动 {self.dbr_thread_count} 个DBR工作线程...")
+        for i in range(self.dbr_thread_count):
+            thread = threading.Thread(
+                target=self.dbr_worker_loop,
+                args=(i,),
+                daemon=True,
+                name=f"DBR-Worker-{i}"
+            )
+            thread.start()
+            self.dbr_threads.append(thread)
+        print(f"✅ {self.dbr_thread_count} 个DBR工作线程已启动")
+    
+    def dbr_worker_loop(self, worker_id):
+        """多线程DBR识别工作线程"""
+        print(f"🔍 DBR工作线程{worker_id}已启动")
+        try:
+            cvr_instance = CaptureVisionRouter()
+        except Exception as e:
+            print(f"❌ DBR工作线程初始化失败: {e}")
+            return
+        
+        while self.running and self.dbr_enabled and self.dbr_queue is not None:
+            try:
+                payload = self.dbr_queue.get(timeout=0.2)
+            except:
+                continue
+            
+            try:
+                recv_seq, jpeg_bytes, slot_index = payload
+                
+                t0 = time.time()
+                captured_result = cvr_instance.capture(jpeg_bytes, EnumPresetTemplate.PT_READ_BARCODES)
+                elapsed_ms = (time.time() - t0) * 1000.0
+                
+                if elapsed_ms > self.dbr_timeout:
+                    continue
+                
+                with self.dbr_stats_lock:
+                    self.dbr_total_time_ms += elapsed_ms
+                    self.dbr_total_attempts += 1
+                
+                if captured_result.get_error_code() != EnumErrorCode.EC_OK and \
+                   captured_result.get_error_code() != EnumErrorCode.EC_UNSUPPORTED_JSON_KEY_WARNING:
+                    continue
+                
+                barcode_result = captured_result.get_decoded_barcodes_result()
+                if barcode_result is None or barcode_result.get_items() == 0:
+                    continue
+                
+                items = barcode_result.get_items()
+                
+                with self.dbr_stats_lock:
+                    self.dbr_total_decoded += len(items)
+                
+                # 写入日志文件
+                if recv_seq is not None and self.dbr_log_file:
+                    try:
+                        result_items = []
+                        for it in items:
+                            try:
+                                result_items.append({
+                                    'fmt': it.get_format_string(),
+                                    'text': it.get_text(),
+                                    'confidence': getattr(it, 'get_confidence', lambda: None)()
+                                })
+                            except:
+                                result_items.append({'fmt': '<unk>', 'text': '<unk>', 'confidence': None})
+                        
+                        slot_status = "N/A"
+                        position_str = "NA"
+                        if slot_index is not None:
+                            try:
+                                slot = self.crops_buffer[slot_index]
+                                if slot and isinstance(slot, dict) and slot.get('recv_seq') == recv_seq:
+                                    slot_status = str(slot_index)
+                                    metadata = slot.get('metadata') or {}
+                                    pose_info = metadata.get('pose', {})
+                                    position_array = pose_info.get('position', [0.0, 0.0, 0.0])
+                                    if len(position_array) >= 3:
+                                        px = f"{position_array[0]:.2f}"
+                                        py = f"{position_array[1]:.2f}"
+                                        pz = f"{position_array[2]:.2f}"
+                                        position_str = f"({px},{py},{pz})"
+                            except:
+                                pass
+                        
+                        with self.dbr_stats_lock:
+                            with open(self.dbr_log_file, 'a', encoding='utf-8') as f:
+                                for it in result_items:
+                                    self.dbr_global_seq += 1
+                                    fmt = it.get('fmt', 'UNK')
+                                    txt = it.get('text', '')
+                                    f.write(f"{self.dbr_global_seq},{recv_seq},{worker_id},{slot_status},{position_str},{fmt},{txt}\n")
+                        
+                        # 更新GUI表格（通过日志文件监听）
+                        
+                    except Exception as e:
+                        print(f"⚠️ DBR日志写入失败: {e}")
+                
+                # 回写到槽位
+                if recv_seq is not None and slot_index is not None:
+                    try:
+                        slot = self.crops_buffer[slot_index]
+                        if slot and isinstance(slot, dict) and slot.get('recv_seq') == recv_seq:
+                            result_items = []
+                            for it in items:
+                                try:
+                                    result_items.append({
+                                        'fmt': it.get_format_string(),
+                                        'text': it.get_text(),
+                                        'confidence': getattr(it, 'get_confidence', lambda: None)()
+                                    })
+                                except:
+                                    result_items.append({'fmt': '<unk>', 'text': '<unk>', 'confidence': None})
+                            slot['dbr_elapsed_ms'] = float(f"{elapsed_ms:.1f}")
+                            slot['dbr_items'] = result_items
+                    except:
+                        pass
+            
+            except Exception as e:
+                print(f"❌ DBR识别异常: {e}")
+    
+    def _check_frame_loss(self):
+        """检测丢帧"""
+        if not hasattr(self, 'current_frame_sequence'):
+            return
+        
+        current_seq = self.current_frame_sequence
+        if not hasattr(self, 'last_frame_sequence'):
+            self.last_frame_sequence = current_seq
+            return
+        
+        if current_seq > self.last_frame_sequence:
+            lost_count = current_seq - self.last_frame_sequence - 1
+            if lost_count > 0:
+                print(f"⚠️ 检测到丢帧: 从 {self.last_frame_sequence} 到 {current_seq}, 丢帧数 {lost_count}")
+        elif current_seq < self.last_frame_sequence:
+            print(f"🔄 序号回退: 从 {self.last_frame_sequence} 到 {current_seq}")
+        
+        self.last_frame_sequence = current_seq
+    
+    def manual_dbr_trigger(self):
+        """手动触发DBR识别"""
+        if not self.dbr_enabled or self.dbr_queue is None:
+            print("❌ 多线程DBR未启用")
+            return
+        
+        display_index = (self.read_index + self.locked_delta) % self.slot_num
+        current_crop = self.crops_buffer[display_index]
+        
+        if not current_crop or not isinstance(current_crop, dict):
+            return
+        
+        img_data = current_crop.get('image_data')
+        if not isinstance(img_data, (bytes, bytearray)):
+            return
+        
+        try:
+            self.recv_seq_counter += 1
+            manual_recv_seq = self.recv_seq_counter
+            payload = (manual_recv_seq, img_data, display_index)
+            self.dbr_queue.put(payload)
+        except Exception as e:
+            print(f"❌ 手动识别异常: {e}")
+    
     def on_closing(self):
         """关闭窗口时的处理"""
         self.running = False
+        # 关闭OpenCV窗口
+        try:
+            cv2.destroyAllWindows()
+        except:
+            pass
+        # 关闭NNG连接
+        if self.nng_subscriber:
+            try:
+                self.nng_subscriber.close()
+            except:
+                pass
         self.root.destroy()
 
 
 def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='二维码识别GUI - 集成版')
+    parser.add_argument('--host', help='监听IP地址 (优先级最高，覆盖配置文件)')
+    parser.add_argument('--client', help='相机节点IP地址 (优先级最高，覆盖配置文件)')
+    parser.add_argument('--dbr', action='store_true', help='启用内置DBR识别')
+    
+    args = parser.parse_args()
+    
     root = tk.Tk()
-    app = QRViewerGUI(root)
+    app = QRViewerGUI(root, listen_host=args.host, camera_ip=args.client, enable_dbr=args.dbr)
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     
     if app.auto_find_latest_var.get():
