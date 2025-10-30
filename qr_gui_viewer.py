@@ -491,6 +491,9 @@ class QRViewerGUI:
                         anchor=tk.W
                     )
             
+            # 绘制左右箭头和翻页控制
+            self.draw_navigation_arrows(canvas_width, canvas_height)
+            
             # 控制提示
             control_text = "ESC=Quit, SPACE=Manual DBR, ←→=Navigate"
             self.image_canvas.create_text(
@@ -503,6 +506,94 @@ class QRViewerGUI:
             
         except Exception as e:
             print(f"覆盖层绘制错误: {e}")
+    
+    def draw_navigation_arrows(self, canvas_width, canvas_height):
+        """绘制左右箭头和翻页控制"""
+        try:
+            # 计算可翻页的范围
+            N = min(self.slot_num, self.received_count)
+            show_left_arrow = self.delta > (1 - N)
+            show_right_arrow = self.delta < 0
+            
+            # 左箭头
+            if show_left_arrow:
+                arrow_text = "<"
+                font_size = 24
+                # 计算文字位置
+                text_x = 30
+                text_y = canvas_height // 2
+                
+                # 绘制箭头文字
+                text_id = self.image_canvas.create_text(
+                    text_x, text_y, 
+                    text=arrow_text, 
+                    fill="white", 
+                    font=('Arial', font_size, 'bold'),
+                    anchor=tk.CENTER
+                )
+                
+                # 设置点击区域（文字周围扩大一些）
+                text_bbox = self.image_canvas.bbox(text_id)
+                if text_bbox:
+                    x1, y1, x2, y2 = text_bbox
+                    padding = 20
+                    self.left_arrow_rect = (x1 - padding, y1 - padding, x2 + padding, y2 + padding)
+                    
+                    # 绘制半透明背景
+                    self.image_canvas.create_rectangle(
+                        x1 - padding, y1 - padding, x2 + padding, y2 + padding,
+                        fill="", outline="white", width=2, stipple="gray50"
+                    )
+            else:
+                self.left_arrow_rect = None
+            
+            # 右箭头
+            if show_right_arrow:
+                arrow_text = ">"
+                font_size = 24
+                # 计算文字位置
+                text_x = canvas_width - 30
+                text_y = canvas_height // 2
+                
+                # 绘制箭头文字
+                text_id = self.image_canvas.create_text(
+                    text_x, text_y, 
+                    text=arrow_text, 
+                    fill="white", 
+                    font=('Arial', font_size, 'bold'),
+                    anchor=tk.CENTER
+                )
+                
+                # 设置点击区域
+                text_bbox = self.image_canvas.bbox(text_id)
+                if text_bbox:
+                    x1, y1, x2, y2 = text_bbox
+                    padding = 20
+                    self.right_arrow_rect = (x1 - padding, y1 - padding, x2 + padding, y2 + padding)
+                    
+                    # 绘制半透明背景
+                    self.image_canvas.create_rectangle(
+                        x1 - padding, y1 - padding, x2 + padding, y2 + padding,
+                        fill="", outline="white", width=2, stipple="gray50"
+                    )
+            else:
+                self.right_arrow_rect = None
+                
+            # 显示当前页码信息
+            if N > 0:
+                current_page = N + self.delta
+                total_pages = N
+                page_text = f"{current_page}/{total_pages}"
+                self.image_canvas.create_text(
+                    canvas_width // 2, canvas_height - 30, 
+                    text=page_text, 
+                    fill="yellow", 
+                    font=('Arial', 12, 'bold'),
+                    anchor=tk.CENTER
+                )
+                
+        except Exception as e:
+            print(f"导航箭头绘制错误: {e}")
     
     def on_key_press(self, event):
         """处理键盘事件"""
@@ -863,12 +954,8 @@ class QRViewerGUI:
     def update_status(self, connected=False):
         """更新连接状态"""
         self.stats['tcp_connected'] = connected
-        if connected:
-            self.status_label.config(foreground='green')
-            self.status_text.config(text="已连接")
-        else:
-            self.status_label.config(foreground='red')
-            self.status_text.config(text="未连接")
+        # 更新TCP连接状态（用于图片显示）
+        self.tcp_connected = connected
     
     def export_to_csv(self):
         """导出CSV文件"""
