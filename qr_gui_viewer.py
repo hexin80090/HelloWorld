@@ -168,8 +168,8 @@ class QRViewerGUI:
         main_paned.add(bottom_paned, weight=1)
         self.bottom_paned = bottom_paned  # 保存引用以便调整分割位置
         
-        # === 区域1：统计信息和导出按钮（左侧，无外框，与图片等宽）===
-        left_frame = ttk.Frame(bottom_paned, padding=(5, 0, 5, 5))  # 上边距为0，与右侧对齐
+        # === 区域1：统计信息和导出按钮（左侧，使用LabelFrame与上排图片边框风格一致）===
+        left_frame = ttk.LabelFrame(bottom_paned, text="统计与控制", padding=5)
         bottom_paned.add(left_frame, weight=0)  # weight=0，手动控制宽度与图片等宽
         self.create_statistics_panel(left_frame)
         self.left_frame = left_frame  # 保存引用
@@ -252,16 +252,16 @@ class QRViewerGUI:
         jump_frame.pack(fill=tk.X, pady=5)
         
         ttk.Label(jump_frame, text="跳转到图片:").pack(side=tk.LEFT, padx=5)
-        self.jump_entry = ttk.Entry(jump_frame, width=10)
+        self.jump_entry = ttk.Entry(jump_frame, width=6)
         self.jump_entry.pack(side=tk.LEFT, padx=2)
         self.jump_entry.bind('<Return>', self.jump_to_image)  # 回车键跳转
         
         jump_btn = ttk.Button(jump_frame, text="跳转", command=self.jump_to_image, width=6)
         jump_btn.pack(side=tk.LEFT, padx=2)
         
-        # 显示当前图片信息（在同一行）
-        self.current_image_info = ttk.Label(jump_frame, text="当前图片: 0/0", font=('Arial', 9))
-        self.current_image_info.pack(side=tk.LEFT, padx=(10, 0))
+        # 显示当前信息（在同一行，自适应宽度铺满）
+        self.current_image_info = ttk.Label(jump_frame, text="当前: 0/0", font=('Arial', 9), anchor=tk.W, width=16)
+        self.current_image_info.pack(side=tk.LEFT, padx=(10, 0), fill=tk.X, expand=True)
         
         
         # 自动查找最新日志文件
@@ -429,6 +429,21 @@ class QRViewerGUI:
         try:
             metadata = current_crop['metadata']
             
+            # 小工具：绘制带半透明背景的文字，返回下一行的 y
+            def draw_text_with_bg(x, y, text, fill, font_tuple):
+                tid = self.image_canvas.create_text(x, y, text=text, fill=fill, font=font_tuple, anchor=tk.NW)
+                bbox = self.image_canvas.bbox(tid)
+                if bbox:
+                    x1, y1, x2, y2 = bbox
+                    pad = 2
+                    # 先置于底层的半透明背景矩形
+                    rect = self.image_canvas.create_rectangle(x1 - pad, y1 - pad, x2 + pad, y2 + pad,
+                                                              fill="#000000", outline="", stipple="gray50")
+                    # 确保矩形在文字下方
+                    self.image_canvas.tag_lower(rect, tid)
+                    return y2 + 6  # 下一行 y（含行距）
+                return y + 18
+
             # 基础信息
             frame_id = current_crop.get('frame_sequence', 0)
             display_index = (self.read_index + self.locked_delta) % self.slot_num
@@ -436,25 +451,23 @@ class QRViewerGUI:
             buffer_vis = min(self.slot_num, self.received_count)
             info_text = f"Frame:{frame_id} | Index:{display_index} | Total:{self.stats['total_recognitions']} | Buffer:{buffer_vis}/{self.slot_num}"
             
-            # 在Canvas上绘制文本
-            self.image_canvas.create_text(
-                10, 20, 
-                text=info_text, 
-                fill="lime", 
-                font=('Arial', 10, 'bold'),
-                anchor=tk.W
-            )
+            # 按行自下而上绘制，避免重叠
+            cur_y = 10
+            cur_y = draw_text_with_bg(10, cur_y, info_text, "lime", ('Arial', 10, 'bold'))
             
             # TCP连接状态
             status_color = "lime" if self.tcp_connected else "red"
             status_text = "TCP: 连接" if self.tcp_connected else "TCP: 断开"
-            self.image_canvas.create_text(
-                canvas_width - 10, 20, 
-                text=status_text, 
-                fill=status_color, 
-                font=('Arial', 10, 'bold'),
-                anchor=tk.E
-            )
+            # 右上角状态同样加背景
+            tid = self.image_canvas.create_text(canvas_width - 10, 10, text=status_text, fill=status_color,
+                                                font=('Arial', 10, 'bold'), anchor=tk.NE)
+            bbox = self.image_canvas.bbox(tid)
+            if bbox:
+                x1, y1, x2, y2 = bbox
+                pad = 2
+                rect = self.image_canvas.create_rectangle(x1 - pad, y1 - pad, x2 + pad, y2 + pad,
+                                                          fill="#000000", outline="", stipple="gray50")
+                self.image_canvas.tag_lower(rect, tid)
             
             # 检测信息
             roi_info = metadata.get('roi', {})
@@ -471,13 +484,7 @@ class QRViewerGUI:
             else:
                 detection_text = f"{label} | Conf: {confidence:.3f}"
             
-            self.image_canvas.create_text(
-                10, 50, 
-                text=detection_text, 
-                fill="yellow", 
-                font=('Arial', 9),
-                anchor=tk.W
-            )
+            cur_y = draw_text_with_bg(10, cur_y, detection_text, "yellow", ('Arial', 9))
             
             # DBR识别结果
             dbr_items = current_crop.get('dbr_items')
@@ -656,7 +663,7 @@ class QRViewerGUI:
             
             # 更新显示信息
             current_page = N + self.delta
-            self.current_image_info.config(text=f"当前图片: {current_page}/{N}")
+            self.current_image_info.config(text=f"当前: {current_page}/{N}")
             
             # 清空输入框
             self.jump_entry.delete(0, tk.END)
@@ -672,9 +679,9 @@ class QRViewerGUI:
             N = min(self.slot_num, self.received_count)
             if N > 0:
                 current_page = N + self.delta
-                self.current_image_info.config(text=f"当前图片: {current_page}/{N}")
+                self.current_image_info.config(text=f"当前: {current_page}/{N}")
             else:
-                self.current_image_info.config(text="当前图片: 0/0")
+                self.current_image_info.config(text="当前: 0/0")
         except Exception as e:
             print(f"更新图片信息错误: {e}")
     
