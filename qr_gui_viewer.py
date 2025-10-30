@@ -89,7 +89,7 @@ class QRViewerGUI:
         
         # OpenCV显示相关（从simple_receiver.py集成）
         self.running = True
-        self.slot_num = 200
+        self.slot_num = 5000
         self.crops_buffer = [None] * self.slot_num
         self.write_index = 0
         self.read_index = -1
@@ -432,7 +432,9 @@ class QRViewerGUI:
             # 基础信息
             frame_id = current_crop.get('frame_sequence', 0)
             display_index = (self.read_index + self.locked_delta) % self.slot_num
-            info_text = f"Frame:{frame_id} | Index:{display_index} | Total:{self.stats['total_recognitions']}"
+            # 展示缓冲与总页：Buffer = 可翻页/缓冲容量
+            buffer_vis = min(self.slot_num, self.received_count)
+            info_text = f"Frame:{frame_id} | Index:{display_index} | Total:{self.stats['total_recognitions']} | Buffer:{buffer_vis}/{self.slot_num}"
             
             # 在Canvas上绘制文本
             self.image_canvas.create_text(
@@ -874,32 +876,37 @@ class QRViewerGUI:
             self.update_final_result(f"加载日志文件失败: {e}")
     
     def parse_and_add_result(self, line):
-        """解析并添加识别结果"""
+        """解析并添加识别结果（稳健解析，避免 position 与 text 中的逗号干扰）"""
         try:
-            parts = [p.strip() for p in line.split(',')]
-            if len(parts) >= 7:
+            # 先从右侧切出 text，再切出 format，剩余为前5列（其中 position 可能含逗号）
+            rest1, text = line.rsplit(',', 1)
+            rest2, fmt = rest1.rsplit(',', 1)
+            # 拆分前四个逗号（得到前5列，其中第5列为完整 position）
+            head = rest2.split(',', 4)
+            if len(head) == 5:
+                global_seq, recv_seq, worker_id, slot_status, position = [h.strip() for h in head]
+                fmt_norm = str(fmt).strip()
                 result = {
-                    'global_seq': parts[0],
-                    'recv_seq': parts[1],
-                    'worker_id': parts[2],
-                    'slot_status': parts[3],
-                    'position': parts[4],
-                    'format': parts[5],
-                    'text': ','.join(parts[6:])
+                    'global_seq': global_seq,
+                    'recv_seq': recv_seq,
+                    'worker_id': worker_id,
+                    'slot_status': slot_status,
+                    'position': position,
+                    'format': fmt_norm,
+                    'text': text.strip()
                 }
                 self.recognition_results.append(result)
                 self.add_result_to_log_tree(result)
-                
-                # 统计
+
+                # 统计（正规化 format 后归类）
                 self.stats['total_recognitions'] += 1
-                format_upper = result['format'].upper()
-                if 'QR' in format_upper or 'QR_CODE' in format_upper:
+                format_upper = fmt_norm.upper().replace('-', '_').replace(' ', '')
+                if 'QR' in format_upper or 'QRCODE' in format_upper or 'QR_CODE' in format_upper:
                     self.stats['qr_code_count'] += 1
                 else:
                     self.stats['barcode_count'] += 1
-                
-                
-                # 更新汇总数据（根据text字段解析商品信息）
+
+                # 更新汇总数据
                 self.update_summary_data(result)
         except Exception as e:
             print(f"解析结果行失败: {e}, 行: {line}")
