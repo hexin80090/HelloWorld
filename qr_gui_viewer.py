@@ -259,9 +259,10 @@ class QRViewerGUI:
         jump_btn = ttk.Button(jump_frame, text="跳转", command=self.jump_to_image, width=6)
         jump_btn.pack(side=tk.LEFT, padx=2)
         
-        # 显示当前图片信息
-        self.current_image_info = ttk.Label(control_frame, text="当前图片: 0/0", font=('Arial', 9))
-        self.current_image_info.pack(anchor=tk.W, pady=2, padx=5)
+        # 显示当前图片信息（在同一行）
+        self.current_image_info = ttk.Label(jump_frame, text="当前图片: 0/0", font=('Arial', 9))
+        self.current_image_info.pack(side=tk.LEFT, padx=(10, 0))
+        
         
         # 自动查找最新日志文件
         self.auto_find_latest_var = tk.BooleanVar(value=True)
@@ -335,14 +336,7 @@ class QRViewerGUI:
     def show_image_placeholder(self):
         """显示图片占位符"""
         self.image_canvas.delete("all")
-        self.image_canvas.create_text(
-            self.image_canvas.winfo_width()//2, 
-            self.image_canvas.winfo_height()//2,
-            text="等待图片数据...\n\n按ESC退出，方向键翻页，空格手动识别",
-            fill="white",
-            font=('Arial', 12),
-            justify=tk.CENTER
-        )
+        # 只显示黑色背景，不显示任何文字
     
     def on_image_click(self, event):
         """处理图片区域的鼠标点击事件"""
@@ -438,7 +432,7 @@ class QRViewerGUI:
             # 基础信息
             frame_id = current_crop.get('frame_sequence', 0)
             display_index = (self.read_index + self.locked_delta) % self.slot_num
-            info_text = f"Frame:{frame_id} | Index:{display_index} | Total:{self.received_count}"
+            info_text = f"Frame:{frame_id} | Index:{display_index} | Total:{self.stats['total_recognitions']}"
             
             # 在Canvas上绘制文本
             self.image_canvas.create_text(
@@ -898,10 +892,12 @@ class QRViewerGUI:
                 
                 # 统计
                 self.stats['total_recognitions'] += 1
-                if 'QR' in result['format'].upper() or 'QR_CODE' in result['format'].upper():
+                format_upper = result['format'].upper()
+                if 'QR' in format_upper or 'QR_CODE' in format_upper:
                     self.stats['qr_code_count'] += 1
                 else:
                     self.stats['barcode_count'] += 1
+                
                 
                 # 更新汇总数据（根据text字段解析商品信息）
                 self.update_summary_data(result)
@@ -1043,6 +1039,10 @@ class QRViewerGUI:
         self.stats['tcp_connected'] = connected
         # 更新TCP连接状态（用于图片显示）
         self.tcp_connected = connected
+        
+        # 更新图片显示区域（如果没有图片时显示连接状态）
+        if hasattr(self, 'image_canvas'):
+            self.root.after(0, self.show_image_placeholder)
     
     def export_to_csv(self):
         """导出CSV文件"""
