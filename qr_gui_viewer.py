@@ -240,12 +240,16 @@ class QRViewerGUI:
         
         # 自动刷新选项
         self.auto_refresh_var = tk.BooleanVar(value=True)
+        # 线程安全的缓存变量（用于后台线程访问）
+        self._auto_refresh = True
         auto_refresh_cb = ttk.Checkbutton(
             control_frame,
             text="自动刷新日志文件",
             variable=self.auto_refresh_var
         )
         auto_refresh_cb.pack(anchor=tk.W, pady=2, padx=5)
+        # 在主线程中同步更新缓存变量
+        self.auto_refresh_var.trace_add('write', lambda *args: setattr(self, '_auto_refresh', self.auto_refresh_var.get()))
         
         # 图片跳转功能
         jump_frame = ttk.Frame(control_frame)
@@ -266,12 +270,16 @@ class QRViewerGUI:
         
         # 自动查找最新日志文件
         self.auto_find_latest_var = tk.BooleanVar(value=True)
+        # 线程安全的缓存变量（用于后台线程访问）
+        self._auto_find_latest = True
         auto_find_cb = ttk.Checkbutton(
             control_frame,
             text="自动查找最新日志文件",
             variable=self.auto_find_latest_var
         )
         auto_find_cb.pack(anchor=tk.W, pady=2, padx=5)
+        # 在主线程中同步更新缓存变量
+        self.auto_find_latest_var.trace_add('write', lambda *args: setattr(self, '_auto_find_latest', self.auto_find_latest_var.get()))
     
     def create_final_result_panel(self, parent):
         """创建区域2：最终识别结果面板（使用表格显示）"""
@@ -1452,15 +1460,19 @@ class QRViewerGUI:
     def log_file_monitor_loop(self):
         """日志文件监听循环"""
         while self.running:
-            if self.auto_find_latest_var.get():
+            # 使用线程安全的缓存变量，避免在主线程外访问Tkinter变量
+            if self._auto_find_latest:
                 latest_log = self.find_latest_log_file()
                 if latest_log and latest_log != self.log_file_path:
                     self.log_file_path = latest_log
-                    self.log_path_var.set(latest_log)
                     self.last_log_position = 0
-                    self.root.after(0, lambda: self.update_final_result(f"自动切换到最新日志: {os.path.basename(latest_log)}"))
+                    # 在主线程中更新Tkinter变量
+                    self.root.after(0, lambda log=latest_log: (
+                        self.log_path_var.set(log),
+                        self.update_final_result(f"自动切换到最新日志: {os.path.basename(log)}")
+                    ))
             
-            if self.auto_refresh_var.get() and self.log_file_path:
+            if self._auto_refresh and self.log_file_path:
                 try:
                     if os.path.exists(self.log_file_path):
                         with open(self.log_file_path, 'r', encoding='utf-8') as f:
@@ -1658,17 +1670,64 @@ class QRViewerGUI:
     def on_closing(self):
         """关闭窗口时的处理"""
         self.running = False
-        # 关闭OpenCV窗口
+        
+        # 等待后台线程结束（给它们时间清理）
+        time.sleep(0.2)
+        
+        # 清空图片缓冲区，释放内存
         try:
-            cv2.destroyAllWindows()
+            if hasattr(self, 'crops_buffer'):
+                for i in range(len(self.crops_buffer)):
+                    self.crops_buffer[i] = None
+                self.crops_buffer = []
+                del self.crops_buffer
         except:
             pass
+        
+        # 清理Canvas中的图片引用
+        try:
+            if hasattr(self, 'image_canvas') and self.image_canvas:
+                self.image_canvas.delete("all")
+                if hasattr(self.image_canvas, 'image'):
+                    del self.image_canvas.image
+        except:
+            pass
+        
+        # 清理TurboJPEG实例
+        try:
+            if hasattr(self, 'jpeg'):
+                del self.jpeg
+        except:
+            pass
+        
+        # 关闭DBR相关资源
+        try:
+            if hasattr(self, 'dbr_log_file') and self.dbr_log_file:
+                # DBR日志文件在写入时已经关闭，这里只是清空引用
+                self.dbr_log_file = None
+        except:
+            pass
+        
         # 关闭NNG连接
         if self.nng_subscriber:
             try:
                 self.nng_subscriber.close()
             except:
                 pass
+        
+        if self.ack_sender:
+            try:
+                self.ack_sender.close()
+            except:
+                pass
+        
+        # 关闭OpenCV窗口
+        try:
+            cv2.destroyAllWindows()
+        except:
+            pass
+        
+        # 最后销毁Tkinter窗口
         self.root.destroy()
 
 
