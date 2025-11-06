@@ -96,7 +96,7 @@ class QRViewerGUI:
         self.latest_index = -1
         self.locked_latest_index = -1
         self.first_crop = True
-        self.base_round_duration = 0.03
+        self.base_round_duration = 0.033  # 33ms，适配30fps视频流（每帧33.3ms）
         self.last_switch_time = 0
         self.delta = 0
         self.locked_delta = 0
@@ -1412,7 +1412,7 @@ class QRViewerGUI:
                 current_time = time.time()
                 
                 if self.read_index != self.latest_index:
-                    # 有新照片到达
+                    # 有新照片到达 - 对于实时视频流（30fps），直接显示最新图片，避免黑屏
                     self.delta = 0
                     self.locked_delta = 0
                     
@@ -1421,12 +1421,12 @@ class QRViewerGUI:
                     if photos_to_show == 0:
                         photos_to_show = 1
                     
-                    # 优化策略：如果有大量新图片（超过3张），智能跳转到最新有效图片
-                    # 这样可以避免滞后，同时避免跳到空槽位导致黑屏
-                    if photos_to_show > 3:
-                        # 查找最新有数据的槽位（不一定是latest_index，因为它可能还没写入）
-                        target_idx = find_latest_valid_index(self.latest_index, max_search=min(photos_to_show, 20))
-                        if target_idx is not None:
+                    # 实时视频流策略：直接跳转到最新有效图片，避免分片显示导致黑屏
+                    # 对于30fps（33.3ms/帧），应该立即显示最新帧，而不是尝试"播放"缓冲区中的所有帧
+                    target_idx = find_latest_valid_index(self.latest_index, max_search=min(photos_to_show + 5, 50))
+                    if target_idx is not None:
+                        # 确保目标槽位有数据
+                        if self.crops_buffer[target_idx] is not None:
                             self.read_index = target_idx
                             self.first_crop = True
                             self.locked_latest_index = self.latest_index
@@ -1435,58 +1435,25 @@ class QRViewerGUI:
                                 self.root.after(0, self.update_image_display)
                                 last_display_time = current_time
                         else:
-                            # 如果找不到有效数据，继续使用当前索引，不跳转
-                            time.sleep(0.001)
-                            continue
-                    else:
-                        # 少量新图片时，逐步显示（保持平滑）
-                        if self.first_crop:
-                            self.locked_latest_index = self.latest_index
-                            display_duration = self.base_round_duration / photos_to_show
-                            self.last_switch_time = current_time
-                        
-                        if self.first_crop:
-                            # 逐步前进，但要确保目标槽位有数据
-                            next_idx = (self.read_index + 1) % self.slot_num
-                            if self.crops_buffer[next_idx] is not None:
-                                self.read_index = next_idx
-                                self.last_switch_time = current_time
-                                if current_time - last_display_time >= min_display_interval:
-                                    self.root.after(0, self.update_image_display)
-                                    last_display_time = current_time
-                            else:
-                                # 目标槽位为空，等待一下再试
-                                time.sleep(0.001)
-                                continue
-                        else:
-                            if current_time - self.last_switch_time >= display_duration:
-                                next_idx = (self.read_index + 1) % self.slot_num
-                                if self.crops_buffer[next_idx] is not None:
-                                    self.read_index = next_idx
-                                    self.last_switch_time = current_time
+                            # 目标槽位为空，向前查找最近的有效槽位
+                            for offset in range(1, min(20, self.slot_num)):
+                                check_idx = (target_idx - offset) % self.slot_num
+                                if self.crops_buffer[check_idx] is not None:
+                                    self.read_index = check_idx
+                                    self.first_crop = True
+                                    self.locked_latest_index = self.latest_index
                                     if current_time - last_display_time >= min_display_interval:
                                         self.root.after(0, self.update_image_display)
                                         last_display_time = current_time
-                                else:
-                                    # 目标槽位为空，直接跳到下一个有效位置
-                                    valid_idx = find_latest_valid_index(self.latest_index, max_search=10)
-                                    if valid_idx is not None:
-                                        self.read_index = valid_idx
-                                        self.last_switch_time = current_time
-                                        if current_time - last_display_time >= min_display_interval:
-                                            self.root.after(0, self.update_image_display)
-                                            last_display_time = current_time
-                                    else:
-                                        time.sleep(0.001)
-                                        continue
+                                    break
                             else:
+                                # 找不到有效数据，保持当前显示
                                 time.sleep(0.001)
                                 continue
-                        
-                        if self.read_index == self.locked_latest_index:
-                            self.first_crop = True
-                        else:
-                            self.first_crop = False
+                    else:
+                        # 如果找不到有效数据，继续使用当前索引，不跳转（避免黑屏）
+                        time.sleep(0.001)
+                        continue
                 else:
                     # 没有新照片时，检查delta变化（手动翻页）
                     if self.delta != self.locked_delta:
