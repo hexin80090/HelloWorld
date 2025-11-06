@@ -10,7 +10,7 @@ import os
 from turbojpeg import TurboJPEG
 
 if len(sys.argv) < 2:
-    print("用法: python3 send_file.py <图片或视频文件路径> [--fps 10]")
+    print("用法: python3 send_file.py <图片或视频文件路径> [--fps 10] [--host 192.168.0.104]")
     sys.exit(1)
 
 file_path = sys.argv[1]
@@ -25,9 +25,16 @@ if '--fps' in sys.argv:
     if idx + 1 < len(sys.argv):
         fps = int(sys.argv[idx + 1])
 
+# 解析HOST参数
+host = "localhost"
+if '--host' in sys.argv:
+    idx = sys.argv.index('--host')
+    if idx + 1 < len(sys.argv):
+        host = sys.argv[idx + 1]
+
 jpeg = TurboJPEG()
 pub = pynng.Pub0()
-pub.dial("tcp://localhost:5555", block=True)
+pub.dial(f"tcp://{host}:5555", block=True)
 print(f"✅ 已连接到接收器，发送文件: {file_path}")
 
 frame_seq = 0
