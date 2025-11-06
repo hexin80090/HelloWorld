@@ -1,0 +1,4 @@
+{
+    "MaxParallelTasks": 8,
+    "Timeout": 10000
+}
