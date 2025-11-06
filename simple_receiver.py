@@ -170,7 +170,7 @@ class SimpleQRReceiver:
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                 self.dbr_log_file = os.path.join(log_dir, f'dbr_multithread_result_{ts}.log')
                 with open(self.dbr_log_file, 'a', encoding='utf-8') as f:
-                    f.write('# global_seq, recv_seq, worker_id, slot_status, position, format, text\n')
+                    f.write('# 全局序号, 接收序号, 工作线程ID, 槽位状态, 位置坐标, 格式, 文本内容\n')
                 print(f"📝 多线程DBR结果将写入: {self.dbr_log_file}")
             except Exception as e:
                 print(f"⚠️ DBR日志初始化失败: {e}")
