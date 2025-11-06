@@ -74,7 +74,7 @@ class SimpleQRReceiver:
         self.latest_index = -1  # 最新照片位置（通知display用）
         self.locked_latest_index = -1  # 锁定的最新位置
         self.first_crop = True  # 是否是第一张照片
-        self.base_round_duration = 0.03  # 一轮30ms（秒）
+        self.base_round_duration = 0.033  # 33ms，适配30fps视频流（每帧33.3ms）
         self.last_switch_time = 0  # 上次切换时间
         self.recv_seq_counter = 0  # 接收序号（单调递增）
         
@@ -676,46 +676,36 @@ class SimpleQRReceiver:
                 # 检查是否有新照片需要显示
                 if self.read_index != self.latest_index:
                     # 有新照片时，清零delta，回到最新照片
+                    # 对于实时视频流（30fps），直接显示最新图片，避免黑屏
                     self.delta = 0
                     self.locked_delta = 0
                     
-                    if self.first_crop:
-                        # 锁定当前最新位置
-                        self.locked_latest_index = self.latest_index                    
-                        # 计算需要显示的照片数量（环形距离）
-                        photos_to_show = (self.locked_latest_index - self.read_index) % self.slot_num
-                        if photos_to_show == 0:
-                            print(f"⚠️ 警告: 计算到 photos_to_show=0 (read={self.read_index}, locked={self.locked_latest_index})，强制设为1避免除零")
-                            photos_to_show = 1
-                        display_duration = self.base_round_duration / photos_to_show
+                    # 计算待显示的图片数量
+                    photos_to_show = (self.latest_index - self.read_index) % self.slot_num
+                    if photos_to_show == 0:
+                        photos_to_show = 1
                     
-                    # 检查是否需要切换到下一张照片
+                    # 实时视频流策略：直接跳转到最新有效图片，避免分片显示导致黑屏
+                    # 对于30fps（33.3ms/帧），应该立即显示最新帧，而不是尝试"播放"缓冲区中的所有帧
                     current_time = time.time()
                     
-                    # 第一张照片：跳过等待，立即显示
-                    if self.first_crop:
-                        # 第一张照片，立即显示
-                        self.read_index = (self.read_index + 1) % self.slot_num
-                        self.last_switch_time = current_time
-                    else:
-                        # 后续照片：需要等待display_duration时间
-                        if current_time - self.last_switch_time >= display_duration:
-                            # 切换到下一张照片
-                            self.read_index = (self.read_index + 1) % self.slot_num
-                            self.last_switch_time = current_time
-                        else:
-                            # 没到时间，跳过所有显示逻辑
-                            time.sleep(0.001)
-                            continue
+                    # 直接跳到最新位置，但确保槽位有数据
+                    target_idx = self.latest_index
+                    # 向前查找最近的有效槽位（最多查找20个）
+                    found_valid = False
+                    for offset in range(0, min(20, self.slot_num)):
+                        check_idx = (target_idx - offset) % self.slot_num
+                        if self.crops_buffer[check_idx] is not None:
+                            self.read_index = check_idx
+                            self.first_crop = True
+                            self.locked_latest_index = self.latest_index
+                            found_valid = True
+                            break
                     
-                    # 如果显示到锁定位置，解锁
-                    if self.read_index == self.locked_latest_index:
-                        # 显示完毕，重置first_crop为True，准备下一轮
-                        self.first_crop = True
-                        print(f"✅ 批次显示完成: {photos_to_show} 张照片")
-                    else:
-                        # 还没显示完，设置first_crop为False
-                        self.first_crop = False
+                    if not found_valid:
+                        # 如果找不到有效数据，保持当前显示，避免黑屏
+                        time.sleep(0.001)
+                        continue
                 else:
                     # 没有新照片需要显示，但在现有画布上叠加TCP状态指示灯
                     # 获取当前窗口大小
