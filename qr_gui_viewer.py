@@ -400,7 +400,7 @@ class QRViewerGUI:
             bgr_image = self.jpeg.decode(img_data)
             
             if bgr_image is None or not isinstance(bgr_image, np.ndarray):
-                self.show_image_placeholder()
+                # 解码失败时，保持当前显示，不清空画布（避免黑屏）
                 return
             
             # 转换为RGB
@@ -445,7 +445,8 @@ class QRViewerGUI:
             
         except Exception as e:
             print(f"图片显示错误: {e}")
-            self.show_image_placeholder()
+            # 发生异常时，保持当前显示，不清空画布（避免黑屏）
+            return
     
     def draw_image_overlay(self, current_crop, canvas_width, canvas_height):
         """在图片上绘制信息覆盖层"""
@@ -1077,9 +1078,14 @@ class QRViewerGUI:
         # 更新TCP连接状态（用于图片显示）
         self.tcp_connected = connected
         
-        # 更新图片显示区域（如果没有图片时显示连接状态）
+        # 更新图片显示区域（只更新覆盖层中的TCP状态，不清空画布）
+        # 如果当前有图片显示，只更新覆盖层；如果没有图片，保持黑色背景
         if hasattr(self, 'image_canvas'):
-            self.root.after(0, self.show_image_placeholder)
+            # 检查是否有图片正在显示
+            if hasattr(self.image_canvas, 'image') and self.image_canvas.image:
+                # 有图片时，只触发覆盖层更新（通过重新显示当前图片）
+                self.root.after(0, self.update_image_display)
+            # 如果没有图片，保持当前状态（可能是黑色背景），不强制清空
     
     def export_to_csv(self):
         """导出CSV文件"""
@@ -1255,7 +1261,7 @@ class QRViewerGUI:
     def _init_dbr(self):
         """初始化多线程DBR识别"""
         try:
-            err_code, err_str = LicenseManager.init_license("t0083YQEAAIxyZ63FS23f0lbnGqIWVNzyJUhlk6dSuGADrJOsEZqnYvegAZSqltDyy/PWWuBX508E6/Ib4GVkVU2PMdf4fVuY/r2pvDcjy6TyBN1USaY=")
+            err_code, err_str = LicenseManager.init_license("f0068dAAAAFWtn4QhSRS1Tvi5U5Q/kX6u5Sz/Onam1CRr122KlQMR8r7g6OjGgpS9wp90khfbsOmOmxWWwcrULU5/VCHDxlY=")
             if err_code != EnumErrorCode.EC_OK and err_code != EnumErrorCode.EC_LICENSE_WARNING:
                 print(f"❌ DBR 许可证初始化失败: {err_code} - {err_str}")
                 self.dbr_enabled = False
@@ -1603,6 +1609,33 @@ class QRViewerGUI:
         print(f"🔍 DBR工作线程{worker_id}已启动")
         try:
             cvr_instance = CaptureVisionRouter()
+            
+            # Obtain current runtime settings of `CCaptureVisionRouter` instance.
+            err_code, err_str, settings = cvr_instance.get_simplified_settings(EnumPresetTemplate.PT_READ_BARCODES.value)
+            
+            # Specify the barcode formats by enumeration values.
+            # Use "|" to enable multiple barcode formats at one time.
+            # 严格按照许可证要求，只启用：Code 39, Code 93, Code 128, Codabar, ITF, EAN-13, EAN-8, UPC-A, UPC-E, INDUSTRIAL 2 OF 5, QR码
+            settings.barcode_settings.barcode_format_ids = (
+                EnumBarcodeFormat.BF_QR_CODE.value |
+                EnumBarcodeFormat.BF_CODE_39.value |
+                EnumBarcodeFormat.BF_CODE_93.value |
+                EnumBarcodeFormat.BF_CODE_128.value |
+                EnumBarcodeFormat.BF_CODABAR.value |
+                EnumBarcodeFormat.BF_ITF.value |
+                EnumBarcodeFormat.BF_EAN_13.value |
+                EnumBarcodeFormat.BF_EAN_8.value |
+                EnumBarcodeFormat.BF_UPC_A.value |
+                EnumBarcodeFormat.BF_UPC_E.value |
+                EnumBarcodeFormat.BF_INDUSTRIAL_25.value
+            )
+            
+            # Update the settings.
+            err_code, err_str = cvr_instance.update_settings(EnumPresetTemplate.PT_READ_BARCODES.value, settings)
+            if err_code != EnumErrorCode.EC_OK:
+                print(f"⚠️ DBR工作线程{worker_id}配置失败: {err_code} - {err_str}")
+            else:
+                print(f"✅ DBR工作线程{worker_id}已配置授权格式")
         except Exception as e:
             print(f"❌ DBR工作线程初始化失败: {e}")
             return

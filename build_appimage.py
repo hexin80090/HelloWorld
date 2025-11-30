@@ -82,7 +82,7 @@ def build_with_pyinstaller():
         '--name', APP_NAME,
         '--onefile',
         '--windowed',  # 无控制台窗口
-        f'--add-data={config_file}:config',
+        f'--add-data={config_file}{os.pathsep}config',  # 使用os.pathsep兼容Windows和Linux
         '--hidden-import=tkinter',
         '--hidden-import=tkinter.ttk',
         '--hidden-import=tkinter.filedialog',
