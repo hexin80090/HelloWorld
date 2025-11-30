@@ -1,0 +1,32 @@
+# 构建产物
+build/
+dist/
+*.spec
+
+# AppImage 文件（太大，不应提交）
+*.AppImage
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 测试结果（可选，根据需要调整）
+# test_results/
+
+# 临时文件
+*.log
+*.tmp
+*.swp
+*~
+
+# IDE 文件
+.vscode/
+.idea/
+*.code-workspace
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
