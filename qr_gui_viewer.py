@@ -34,9 +34,9 @@ class QRViewerGUI:
         
         # 配置参数（从命令行参数获取）
         self.listen_host = listen_host if listen_host else '0.0.0.0'
-        self.listen_port = 5555
+        self.listen_port = 6666
         self.camera_node_ip = camera_ip if camera_ip else '192.168.0.176'
-        self.ack_port = 5556
+        self.ack_port = 6667
         self.dbr_enabled = bool(enable_dbr)
         
         # 加载配置文件
@@ -1857,6 +1857,11 @@ def main():
     parser.add_argument('--dbr', action='store_true', help='启用内置DBR识别')
     
     args = parser.parse_args()
+    
+    # 如果是从PyInstaller打包的exe运行，自动启用DBR
+    if getattr(sys, 'frozen', False):
+        # 打包后的exe运行，自动启用DBR
+        args.dbr = True
     
     root = tk.Tk()
     app = QRViewerGUI(root, listen_host=args.host, camera_ip=args.client, enable_dbr=args.dbr)

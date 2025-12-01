@@ -1,0 +1,14 @@
+# Windows exe 构建所需的依赖包
+# 使用方法: pip install -r requirements_build.txt
+
+# 构建工具
+PyInstaller>=5.0.0
+
+# 应用程序依赖
+opencv-python>=4.5.0
+numpy>=1.20.0
+Pillow>=8.0.0
+pynng>=0.7.0
+turbojpeg>=1.2.0
+dynamsoft-barcode-reader-bundle>=9.0.0
+

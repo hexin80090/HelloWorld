@@ -167,7 +167,7 @@ def create_appdir():
 HERE="$(dirname "$(readlink -f "${{0}}")")"
 export PATH="${{HERE}}/usr/bin:${{PATH}}"
 export LD_LIBRARY_PATH="${{HERE}}/usr/lib:${{LD_LIBRARY_PATH}}"
-exec "${{HERE}}/usr/bin/{APP_NAME}" "$@"
+exec "${{HERE}}/usr/bin/{APP_NAME}" --dbr "$@"
 '''
     with open(APP_DIR / "AppRun", 'w') as f:
         f.write(apprun_content)

@@ -32,10 +32,17 @@ if '--host' in sys.argv:
     if idx + 1 < len(sys.argv):
         host = sys.argv[idx + 1]
 
+# 解析PORT参数
+port = 6666  # 默认端口
+if '--port' in sys.argv:
+    idx = sys.argv.index('--port')
+    if idx + 1 < len(sys.argv):
+        port = int(sys.argv[idx + 1])
+
 jpeg = TurboJPEG()
 pub = pynng.Pub0()
-pub.dial(f"tcp://{host}:5555", block=True)
-print(f"✅ 已连接到接收器，发送文件: {file_path}")
+pub.dial(f"tcp://{host}:{port}", block=True)
+print(f"✅ 已连接到接收器 {host}:{port}，发送文件: {file_path}")
 
 frame_seq = 0
 
